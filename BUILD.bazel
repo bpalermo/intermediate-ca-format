@@ -1,0 +1,62 @@
+load("@gazelle//:def.bzl", "gazelle")
+load("@rules_go//go:def.bzl", "TOOLS_NOGO", "go_library", "go_test", "nogo")
+load("//bazel/nogo:staticcheck.bzl", "STATICCHECK")
+
+# gazelle:prefix github.com/bpalermo/intermediate-ca-format
+#
+# The generated secret.pb.go is committed, and the go_library of it is what
+# imports of its package mean; //intermediateca/v1:secret_go_proto (which
+# generates the file, and is never compiled for use) has the same import path.
+# gazelle:resolve go github.com/bpalermo/intermediate-ca-format/intermediateca/v1 //intermediateca/v1:intermediateca
+
+gazelle(name = "gazelle")
+
+# The analyzers every Go package is compiled with (see go_sdk.nogo in
+# MODULE.bazel): the ones `go vet` runs, the rest of the x/tools set that
+# rules_go recommends, and staticcheck.
+nogo(
+    name = "nogo",
+    visibility = ["//visibility:public"],
+    deps = TOOLS_NOGO + STATICCHECK,
+)
+
+exports_files([
+    ".shellcheckrc",
+    # The release being worked towards; see bazel/workspace_status.sh.
+    "VERSION",
+    # The buf configuration: its lint rules (//intermediateca/v1) and its
+    # breaking-change rules (scripts/proto-breaking.sh).
+    "buf.yaml",
+])
+
+alias(
+    name = "format",
+    actual = "//bazel/format",
+)
+
+alias(
+    name = "format.check",
+    actual = "//bazel/format:format.check",
+)
+
+go_library(
+    name = "intermediate-ca-format",
+    srcs = ["intermediateca.go"],
+    importpath = "github.com/bpalermo/intermediate-ca-format",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//intermediateca/v1:intermediateca",
+        "@build_buf_go_protovalidate//:protovalidate",
+        "@org_golang_google_protobuf//encoding/protojson",
+    ],
+)
+
+go_test(
+    name = "intermediate-ca-format_test",
+    srcs = ["intermediateca_test.go"],
+    data = glob(["testdata/**"]),
+    deps = [
+        ":intermediate-ca-format",
+        "//internal/testpki",
+    ],
+)

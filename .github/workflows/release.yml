@@ -1,0 +1,98 @@
+name: release
+
+# A tag v<VERSION> or v<VERSION>-rc.<n> on a commit of main releases that
+# version. This is a library: the Go module's version is the tag itself, so the
+# GitHub Release carries release notes and no files. Who may create such a tag,
+# and that it can never be moved or deleted, is the repository's tag rulesets'.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Third-party actions are pinned to commit SHAs, not tags; the version each SHA
+# corresponds to is in the comment beside it.
+jobs:
+  release:
+    name: release notes
+    runs-on: ubuntu-latest
+    permissions:
+      # Creates the GitHub Release.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The tag is checked against main's history, and the notes list the
+          # changes since the previous tag: both need all of it.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A release is something main has been, never a side branch. ls-remote
+      # rather than the API: the repository is public, so the check needs no
+      # token.
+      - name: Refuse a tag that is not on main
+        run: |
+          set -euo pipefail
+          tip="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/main | cut -f1)"
+          if [ -z "${tip}" ]; then
+            echo "::error::could not read main's tip" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" "${tip}"; then
+            echo "::error::refusing to release ${GITHUB_REF_NAME}: ${GITHUB_SHA} is not a commit of main" >&2
+            exit 1
+          fi
+          echo "releasing ${GITHUB_REF_NAME} from ${GITHUB_SHA}, a commit of main"
+
+      # The tag must be a release VERSION names: a Go module version is a tag,
+      # and a tag VERSION does not match would be a release of nothing.
+      - name: The tag is a release of VERSION
+        run: |
+          set -euo pipefail
+          status="$(bazel/workspace_status.sh)"
+          release="$(sed -n 's/^STABLE_RELEASE_TAG //p' <<<"${status}")"
+          if [ "${release}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::${GITHUB_REF_NAME} is not a release of VERSION $(cat VERSION) (the workspace status says '${release}')" >&2
+            exit 1
+          fi
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          prerelease=()
+          if [[ "${tag}" == *-rc.* ]]; then
+            prerelease=(--prerelease)
+          fi
+          # The changes since the last release, not since the last candidate.
+          # The first release has none before it, and lists everything.
+          previous="$(git tag --list 'v*' --sort=-version:refname --merged "${GITHUB_SHA}" |
+            grep -Ev -- '-rc\.' | grep -vx "${tag}" | head -1 || true)"
+          args=(-f "tag_name=${tag}")
+          if [ -n "${previous}" ]; then
+            args+=(-f "previous_tag_name=${previous}")
+          fi
+          changes="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" "${args[@]}" --jq .body)"
+          cat >notes.md <<NOTES
+          ## Use
+
+          \`\`\`bash
+          go get github.com/bpalermo/intermediate-ca-format@${tag}
+          \`\`\`
+
+          The format is \`intermediate-ca/v1\`, specified in
+          [docs/secret-format.md](https://github.com/${GITHUB_REPOSITORY}/blob/${tag}/docs/secret-format.md).
+          It is frozen: a breaking change is a new format version, never a new
+          release of this one.
+
+          ${changes}
+          NOTES
+          gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
+            --title "${tag}" --notes-file notes.md "${prerelease[@]}"
